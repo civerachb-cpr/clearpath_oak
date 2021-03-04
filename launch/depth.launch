@@ -1,0 +1,12 @@
+<launch>
+  <node name="oak_stereo" pkg="clearpath_oak" type="stereo_node">
+  </node>
+
+  <node pkg="nodelet" type="nodelet" name="nodelet_manager" args="manager" />
+  <node pkg="nodelet" type="nodelet" name="depth_image_to_pointcloud_nodelet"
+        args="load depth_image_proc/point_cloud_xyz nodelet_manager">
+    <remap from="camera_info" to="/left/camera_info"/>
+    <remap from="image_rect" to="/stereo/image"/>
+    <remap from="points" to="/stereo/points"/>
+  </node>
+</launch>

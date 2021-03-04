@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+
+import rospy
+from sensor_msgs.msg import CameraInfo
+from sensor_msgs.msg import Image
+
+import camera_info_manager
+
+import cv2
+import cv_bridge
+import depthai as dai
+import numpy as np
+
+class StereoNode:
+    def __init__(self):
+        self.frame_id = rospy.get_param("frame_id", "base_link")
+        self.params_uri = rospy.get_param("params_uri", "package://clearpath_oak/config/camera")
+        self.load_params()
+
+        self.stereo_pub = rospy.Publisher("stereo/image", Image, queue_size=10)
+        self.left_pub = rospy.Publisher("left/image", Image, queue_size=10)
+        self.right_pub = rospy.Publisher("right/image", Image, queue_size=10)
+        self.rgb_pub = rospy.Publisher("color/image", Image, queue_size=10)
+
+        self.bridge = cv_bridge.CvBridge()
+
+        self.pipeline = dai.Pipeline()
+
+        # Define a source - two mono (grayscale) cameras
+        self.cam_left = self.pipeline.createMonoCamera()
+        self.cam_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        self.cam_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
+        self.cam_right = self.pipeline.createMonoCamera()
+        self.cam_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        self.cam_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+
+        # Create a node that will produce the depth map (using disparity output as it's easier to visualize depth this way)
+        self.cam_depth = self.pipeline.createStereoDepth()
+        self.cam_depth.setConfidenceThreshold(200)
+        self.cam_left.out.link(self.cam_depth.left)
+        self.cam_right.out.link(self.cam_depth.right)
+
+        # Create the RGB stream too
+        self.cam_rgb = self.pipeline.createColorCamera()
+        self.cam_rgb.setPreviewSize(800,600)
+        self.cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
+        self.cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        self.cam_rgb.setInterleaved(False)
+        self.cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
+
+
+    def load_params(self):
+        """
+        Load the calibration information from the parameter files
+        """
+        left_param = self.params_uri + "/left.yaml"
+        right_param = self.params_uri + "/right.yaml"
+        stereo_param = self.params_uri + "/stereo.yaml"
+        rgb_param = self.params_uri + "/color.yaml"
+
+        self.left_info_pub = rospy.Publisher("left/camera_info", CameraInfo, latch=True, queue_size=10)
+        self.right_info_pub = rospy.Publisher("right/camera_info", CameraInfo, latch=True, queue_size=10)
+        self.stereo_info_pub = rospy.Publisher("stereo/camera_info", CameraInfo, latch=True, queue_size=10)
+        self.rgb_info_pub = rospy.Publisher("color/camera_info", CameraInfo, latch=True, queue_size=10)
+
+        self.left_camera_mgr = camera_info_manager.CameraInfoManager('left', left_param, 'left')
+        self.left_camera_mgr.loadCameraInfo()
+        self.right_camera_mgr = camera_info_manager.CameraInfoManager('right', right_param, 'right')
+        self.right_camera_mgr.loadCameraInfo()
+        self.stereo_camera_mgr = camera_info_manager.CameraInfoManager('stereo', stereo_param, 'stereo')
+        self.stereo_camera_mgr.loadCameraInfo()
+        self.rgb_camera_mgr = camera_info_manager.CameraInfoManager('color', rgb_param, 'color')
+        self.rgb_camera_mgr.loadCameraInfo()
+
+    def run(self):
+        # create the necessary outputs
+        xout_left = self.pipeline.createXLinkOut()
+        xout_left.setStreamName('left')
+        self.cam_left.out.link(xout_left.input)
+
+        xout_right = self.pipeline.createXLinkOut()
+        xout_right.setStreamName('right')
+        self.cam_right.out.link(xout_right.input)
+
+        xout_stereo = self.pipeline.createXLinkOut()
+        xout_stereo.setStreamName("disparity")
+        self.cam_depth.disparity.link(xout_stereo.input)
+
+        xout_rgb = self.pipeline.createXLinkOut()
+        xout_rgb.setStreamName("rgb")
+        self.cam_rgb.preview.link(xout_rgb.input)
+
+        with dai.Device(self.pipeline) as device:
+            # Start pipeline
+            device.startPipeline()
+
+            # Output queue will be used to get the disparity frames from the outputs defined above
+            q_left = device.getOutputQueue(name="left", maxSize=4, blocking=False)
+            q_right = device.getOutputQueue(name="right", maxSize=4, blocking=False)
+            q_stereo = device.getOutputQueue(name="disparity", maxSize=4, blocking=False)
+            q_rgb = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+
+            while not rospy.is_shutdown():
+                in_left = q_left.tryGet()
+                in_right = q_right.tryGet()
+                in_stereo = q_stereo.tryGet()
+                in_rgb = q_rgb.tryGet()
+
+                stamp = rospy.Time.now()
+
+                if in_left is not None:
+                    left_frame = in_left.getData().reshape((in_left.getHeight(), in_left.getWidth())).astype(np.uint8)
+                    left_frame = np.ascontiguousarray(left_frame)
+
+                    left_image = self.bridge.cv2_to_imgmsg(left_frame)
+                    left_image.header.stamp = stamp
+                    left_image.header.frame_id = self.frame_id
+                    self.left_pub.publish(left_image)
+                    self.publish_camera_info(self.left_camera_mgr, self.left_info_pub, stamp)
+
+                if in_right is not None:
+                    right_frame = in_right.getData().reshape((in_right.getHeight(), in_right.getWidth())).astype(np.uint8)
+                    right_frame = np.ascontiguousarray(right_frame)
+
+                    right_image = self.bridge.cv2_to_imgmsg(right_frame)
+                    right_image.header.stamp = stamp
+                    right_image.header.frame_id = self.frame_id
+                    self.right_pub.publish(right_image)
+                    self.publish_camera_info(self.right_camera_mgr, self.right_info_pub, stamp)
+
+                if in_stereo is not None:
+                    stereo_frame = in_stereo.getData().reshape((in_stereo.getHeight(), in_stereo.getWidth())).astype(np.uint16)
+                    stereo_frame = np.ascontiguousarray(stereo_frame)
+
+                    stereo_image = self.bridge.cv2_to_imgmsg(stereo_frame)
+                    stereo_image.header.stamp = stamp
+                    stereo_image.header.frame_id = self.frame_id
+                    self.stereo_pub.publish(stereo_image)
+                    self.publish_camera_info(self.stereo_camera_mgr, self.stereo_info_pub, stamp)
+
+                if in_rgb is not None:
+                    rgb_frame = in_rgb.getCvFrame()
+
+                    rgb_image = self.bridge.cv2_to_imgmsg(rgb_frame)
+                    rgb_image.header.stamp = stamp
+                    rgb_image.header.frame_id = self.frame_id
+                    self.rgb_pub.publish(rgb_image)
+                    self.publish_camera_info(self.rgb_camera_mgr, self.rgb_info_pub, stamp)
+
+    def publish_camera_info(self, mgr, pub, stamp):
+        data = mgr.getCameraInfo()
+        data.header.stamp = stamp
+        data.header.frame_id = self.frame_id
+        pub.publish(data)
+
+
+if __name__=='__main__':
+    rospy.init_node('stereo_node')
+    node = StereoNode()
+
+    node.run()
+    rospy.spin()
