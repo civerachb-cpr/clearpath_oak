@@ -34,11 +34,11 @@ class StereoNode:
         self.cam_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
         self.cam_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
 
-        # Create a node that will produce the depth map (using disparity output as it's easier to visualize depth this way)
-        self.cam_depth = self.pipeline.createStereoDepth()
-        self.cam_depth.setConfidenceThreshold(200)
-        self.cam_left.out.link(self.cam_depth.left)
-        self.cam_right.out.link(self.cam_depth.right)
+        # Create the stereo source
+        self.cam_stereo = self.pipeline.createStereoDepth()
+        self.cam_stereo.setConfidenceThreshold(200)
+        self.cam_left.out.link(self.cam_stereo.left)
+        self.cam_right.out.link(self.cam_stereo.right)
 
         # Create the RGB stream too
         self.cam_rgb = self.pipeline.createColorCamera()
@@ -84,7 +84,7 @@ class StereoNode:
 
         xout_stereo = self.pipeline.createXLinkOut()
         xout_stereo.setStreamName("disparity")
-        self.cam_depth.disparity.link(xout_stereo.input)
+        self.cam_stereo.disparity.link(xout_stereo.input)
 
         xout_rgb = self.pipeline.createXLinkOut()
         xout_rgb.setStreamName("rgb")
