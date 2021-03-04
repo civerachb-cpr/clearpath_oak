@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import rospy
-from sensor_msgs.msg import CameraInfo
+
+from clearpath_oak.msg import DetectedObject, DetectedObjects, BoundingBox2D, Point2D
+from sensor_msgs.msg import CameraInfo, Image
 from sensor_msgs.msg import Image
 
 import camera_info_manager
@@ -11,16 +13,21 @@ import cv_bridge
 import depthai as dai
 import numpy as np
 
+RGB_WIDTH=300
+RGB_HEIGHT=300
+
 class StereoNode:
     def __init__(self):
         self.frame_id = rospy.get_param("frame_id", "base_link")
         self.params_uri = rospy.get_param("params_uri", "package://clearpath_oak/config/camera")
+        self.nn_path = rospy.get_param("~nn_path")
         self.load_params()
 
         self.stereo_pub = rospy.Publisher("stereo/image", Image, queue_size=10)
         self.left_pub = rospy.Publisher("left/image", Image, queue_size=10)
         self.right_pub = rospy.Publisher("right/image", Image, queue_size=10)
         self.rgb_pub = rospy.Publisher("color/image", Image, queue_size=10)
+        self.objects_pub = rospy.Publisher("detected_objects", DetectedObjects, queue_size=10)
 
         self.bridge = cv_bridge.CvBridge()
 
@@ -42,12 +49,15 @@ class StereoNode:
 
         # Create the RGB stream too
         self.cam_rgb = self.pipeline.createColorCamera()
-        self.cam_rgb.setPreviewSize(800,600)
+        self.cam_rgb.setPreviewSize(RGB_WIDTH, RGB_HEIGHT)
         self.cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
         self.cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         self.cam_rgb.setInterleaved(False)
         self.cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
 
+        self.detection_nn = self.pipeline.createNeuralNetwork()
+        self.detection_nn.setBlobPath(self.nn_path)
+        self.cam_rgb.preview.link(self.detection_nn.input)
 
     def load_params(self):
         """
@@ -90,6 +100,10 @@ class StereoNode:
         xout_rgb.setStreamName("rgb")
         self.cam_rgb.preview.link(xout_rgb.input)
 
+        xout_nn = self.pipeline.createXLinkOut()
+        xout_nn.setStreamName("nn")
+        self.detection_nn.out.link(xout_nn.input)
+
         with dai.Device(self.pipeline) as device:
             # Start pipeline
             device.startPipeline()
@@ -99,12 +113,15 @@ class StereoNode:
             q_right = device.getOutputQueue(name="right", maxSize=4, blocking=False)
             q_stereo = device.getOutputQueue(name="disparity", maxSize=4, blocking=False)
             q_rgb = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+            q_nn = device.getOutputQueue("nn")
 
             while not rospy.is_shutdown():
                 in_left = q_left.tryGet()
                 in_right = q_right.tryGet()
                 in_stereo = q_stereo.tryGet()
                 in_rgb = q_rgb.tryGet()
+
+                in_nn = q_nn.tryGet()
 
                 stamp = rospy.Time.now()
 
@@ -146,6 +163,44 @@ class StereoNode:
                     rgb_image.header.frame_id = self.frame_id
                     self.rgb_pub.publish(rgb_image)
                     self.publish_camera_info(self.rgb_camera_mgr, self.rgb_info_pub, stamp)
+
+                if in_nn is not None:
+                    # [[image_id, label, confidence, x_min, y_min, x_max, y_max], ...]
+                    results = np.array(in_nn.getFirstLayerFp16())
+                    results = results[:np.where(results == -1)[0][0]]
+                    results = results.reshape((results.size // 7, 7))
+
+                    # reshape the array to be [[x7], [x7], ...]
+                    results = results[results[:, 2] > 0.8][:, 0:7]
+
+                    if len(results) > 0:
+                        objects = DetectedObjects()
+                        arr = []
+                        objects.header.stamp = stamp
+                        for r in results:
+                            o = DetectedObject()
+                            o.label = int(r[1])
+                            o.confidence = r[2]
+
+                            ctr_x = (r[3] + r[5])/2
+                            ctr_y = (r[4] + r[6])/2
+                            w = r[5] - r[3]
+                            h = r[6] - r[4]
+
+                            ctr_x = ctr_x * RGB_WIDTH
+                            ctr_y = ctr_y * RGB_HEIGHT
+                            w = w * RGB_WIDTH
+                            h = h * RGB_HEIGHT
+
+                            o.bbox = BoundingBox2D()
+                            o.bbox.center = Point2D(ctr_x, ctr_y)
+                            o.bbox.size_x = w
+                            o.bbox.size_y = h
+
+                            arr.append(o)
+
+                        objects.objects = arr
+                        self.objects_pub.publish(objects)
 
     def publish_camera_info(self, mgr, pub, stamp):
         data = mgr.getCameraInfo()
