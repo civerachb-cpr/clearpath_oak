@@ -10,17 +10,16 @@ find_package(catkin REQUIRED COMPONENTS
 )
 add_message_files(
   FILES
-  BoundingBox2D.msg
   DetectedObject.msg
   DetectedObjects.msg
-  Point2D.msg
 )
 
 generate_messages(
   DEPENDENCIES
   std_msgs
-  sensor_msgs
   geometry_msgs
+  sensor_msgs
+  vision_msgs
 )
 
 ###################################

@@ -2,9 +2,11 @@
 
 import rospy
 
-from clearpath_oak.msg import DetectedObject, DetectedObjects, BoundingBox2D, Point2D
+from clearpath_oak.msg import DetectedObject, DetectedObjects
+from geometry_msgs.msg import Pose2D
 from sensor_msgs.msg import CameraInfo, Image
 from sensor_msgs.msg import Image
+from vision_msgs.msg import BoundingBox2D
 
 import camera_info_manager
 
@@ -196,7 +198,7 @@ class StereoNode:
                             h = h * RGB_HEIGHT
 
                             o.bbox = BoundingBox2D()
-                            o.bbox.center = Point2D(ctr_x, ctr_y)
+                            o.bbox.center = Pose2D(ctr_x, ctr_y, 0)
                             o.bbox.size_x = w
                             o.bbox.size_y = h
 
