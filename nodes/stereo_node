@@ -21,6 +21,7 @@ class StereoNode:
         self.frame_id = rospy.get_param("frame_id", "base_link")
         self.params_uri = rospy.get_param("params_uri", "package://clearpath_oak/config/camera")
         self.nn_path = rospy.get_param("~nn_path")
+        self.categories = rospy.get_param("~categories")
         self.load_params()
 
         self.stereo_pub = rospy.Publisher("stereo/image", Image, queue_size=10)
@@ -157,6 +158,7 @@ class StereoNode:
 
                 if in_rgb is not None:
                     rgb_frame = in_rgb.getCvFrame()
+                    self.last_rgb = rgb_frame
 
                     rgb_image = self.bridge.cv2_to_imgmsg(rgb_frame)
                     rgb_image.header.stamp = stamp
@@ -179,7 +181,8 @@ class StereoNode:
                         objects.header.stamp = stamp
                         for r in results:
                             o = DetectedObject()
-                            o.label = int(r[1])
+                            o.category = int(r[1])
+                            o.label = self.categories[int(r[1])]
                             o.confidence = r[2]
 
                             ctr_x = (r[3] + r[5])/2
@@ -196,6 +199,11 @@ class StereoNode:
                             o.bbox.center = Point2D(ctr_x, ctr_y)
                             o.bbox.size_x = w
                             o.bbox.size_y = h
+
+                            if self.last_rgb is not None:
+                                cropped = self.last_rgb[int(r[4]*RGB_HEIGHT):int(r[6]*RGB_HEIGHT), int(r[3]*RGB_WIDTH):int(r[5]*RGB_WIDTH)]
+                                roi = self.bridge.cv2_to_imgmsg(cropped)
+                                o.image = roi
 
                             arr.append(o)
 

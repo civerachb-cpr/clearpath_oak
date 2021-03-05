@@ -2,6 +2,7 @@
   <arg name="nn_path" default="$(find clearpath_oak)/nn/mobilenet-ssd.blob" />
   <node name="oak_stereo" pkg="clearpath_oak" type="stereo_node">
     <param name="nn_path"  value="$(arg nn_path)" />
+    <rosparam command="load" file="$(find clearpath_oak)/config/categories.yaml" />
   </node>
 
   <node pkg="nodelet" type="nodelet" name="nodelet_manager" args="manager" />
