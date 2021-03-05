@@ -2,8 +2,8 @@
 Changelog for package clearpath_oak
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+0.1.0 (2021-03-04)
+------------------
 * Add the README
 * Rename the node to "oak_node" put all the launch topics in a namespace for cleanliness
 * Use the vision_msgs instead of rolling our own versions. Fix the msg dependencies. Add a .rosinstall file to track the external dependencies

@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="2">
   <name>clearpath_oak</name>
-  <version>0.0.0</version>
+  <version>0.1.0</version>
   <description>Experimental ROS driver for the OAK-D camera</description>
   <maintainer email="civerachb@clearpathrobotics.todo">Chris Iverach-Brereton</maintainer>
   <license>BSD</license>
