@@ -18,7 +18,7 @@ import numpy as np
 RGB_WIDTH=300
 RGB_HEIGHT=300
 
-class StereoNode:
+class OakNode:
     def __init__(self):
         self.frame_id = rospy.get_param("frame_id", "base_link")
         self.params_uri = rospy.get_param("params_uri", "package://clearpath_oak/config/camera")
@@ -220,8 +220,8 @@ class StereoNode:
 
 
 if __name__=='__main__':
-    rospy.init_node('stereo_node')
-    node = StereoNode()
+    rospy.init_node('oak_node')
+    node = OakNode()
 
     node.run()
     rospy.spin()
