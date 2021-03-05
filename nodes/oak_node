@@ -49,6 +49,10 @@ class OakNode:
         self.cam_stereo.setConfidenceThreshold(200)
         self.cam_left.out.link(self.cam_stereo.left)
         self.cam_right.out.link(self.cam_stereo.right)
+        self.cam_stereo.setSubpixel(False)
+        self.cam_stereo.setLeftRightCheck(False)
+        self.cam_stereo.setExtendedDisparity(False)
+        self.cam_stereo.setOutputDepth(True)
 
         # Create the RGB stream too
         self.cam_rgb = self.pipeline.createColorCamera()
@@ -96,8 +100,8 @@ class OakNode:
         self.cam_right.out.link(xout_right.input)
 
         xout_stereo = self.pipeline.createXLinkOut()
-        xout_stereo.setStreamName("disparity")
-        self.cam_stereo.disparity.link(xout_stereo.input)
+        xout_stereo.setStreamName("depth")
+        self.cam_stereo.depth.link(xout_stereo.input)
 
         xout_rgb = self.pipeline.createXLinkOut()
         xout_rgb.setStreamName("rgb")
@@ -107,14 +111,15 @@ class OakNode:
         xout_nn.setStreamName("nn")
         self.detection_nn.out.link(xout_nn.input)
 
+        self.last_rgb = None
         with dai.Device(self.pipeline) as device:
             # Start pipeline
             device.startPipeline()
 
-            # Output queue will be used to get the disparity frames from the outputs defined above
+            # Output queue will be used to get the depth frames from the outputs defined above
             q_left = device.getOutputQueue(name="left", maxSize=4, blocking=False)
             q_right = device.getOutputQueue(name="right", maxSize=4, blocking=False)
-            q_stereo = device.getOutputQueue(name="disparity", maxSize=4, blocking=False)
+            q_stereo = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
             q_rgb = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
             q_nn = device.getOutputQueue("nn")
 
@@ -123,94 +128,124 @@ class OakNode:
                 in_right = q_right.tryGet()
                 in_stereo = q_stereo.tryGet()
                 in_rgb = q_rgb.tryGet()
-
                 in_nn = q_nn.tryGet()
-
                 stamp = rospy.Time.now()
 
                 if in_left is not None:
-                    left_frame = in_left.getData().reshape((in_left.getHeight(), in_left.getWidth())).astype(np.uint8)
-                    left_frame = np.ascontiguousarray(left_frame)
-
-                    left_image = self.bridge.cv2_to_imgmsg(left_frame)
-                    left_image.header.stamp = stamp
-                    left_image.header.frame_id = self.frame_id
-                    self.left_pub.publish(left_image)
-                    self.publish_camera_info(self.left_camera_mgr, self.left_info_pub, stamp)
+                    self.publish_left_frame(in_left, stamp)
 
                 if in_right is not None:
-                    right_frame = in_right.getData().reshape((in_right.getHeight(), in_right.getWidth())).astype(np.uint8)
-                    right_frame = np.ascontiguousarray(right_frame)
-
-                    right_image = self.bridge.cv2_to_imgmsg(right_frame)
-                    right_image.header.stamp = stamp
-                    right_image.header.frame_id = self.frame_id
-                    self.right_pub.publish(right_image)
-                    self.publish_camera_info(self.right_camera_mgr, self.right_info_pub, stamp)
+                    self.publish_right_frame(in_right, stamp)
 
                 if in_stereo is not None:
-                    stereo_frame = in_stereo.getData().reshape((in_stereo.getHeight(), in_stereo.getWidth())).astype(np.uint16)
-                    stereo_frame = np.ascontiguousarray(stereo_frame)
-
-                    stereo_image = self.bridge.cv2_to_imgmsg(stereo_frame)
-                    stereo_image.header.stamp = stamp
-                    stereo_image.header.frame_id = self.frame_id
-                    self.stereo_pub.publish(stereo_image)
-                    self.publish_camera_info(self.stereo_camera_mgr, self.stereo_info_pub, stamp)
+                    self.publish_stereo_frame(in_stereo, stamp)
 
                 if in_rgb is not None:
-                    rgb_frame = in_rgb.getCvFrame()
-                    self.last_rgb = rgb_frame
-
-                    rgb_image = self.bridge.cv2_to_imgmsg(rgb_frame)
-                    rgb_image.header.stamp = stamp
-                    rgb_image.header.frame_id = self.frame_id
-                    self.rgb_pub.publish(rgb_image)
-                    self.publish_camera_info(self.rgb_camera_mgr, self.rgb_info_pub, stamp)
+                    self.publish_color_frame(in_rgb, stamp)
 
                 if in_nn is not None:
-                    # [[image_id, label, confidence, x_min, y_min, x_max, y_max], ...]
-                    results = np.array(in_nn.getFirstLayerFp16())
-                    results = results[:np.where(results == -1)[0][0]]
-                    results = results.reshape((results.size // 7, 7))
+                    self.publish_nn_detect(in_nn, stamp)
 
-                    # reshape the array to be [[x7], [x7], ...]
-                    results = results[results[:, 2] > 0.8][:, 0:7]
+    def publish_stereo_frame(self, in_stereo, stamp):
+        try:
+            stereo_frame = in_stereo.getData()
+            stereo_frame = np.frombuffer(stereo_frame, dtype=np.uint16)
+            stereo_frame = stereo_frame.reshape((in_stereo.getHeight(), in_stereo.getWidth()))
+            stereo_frame = np.ascontiguousarray(stereo_frame)
 
-                    if len(results) > 0:
-                        objects = DetectedObjects()
-                        arr = []
-                        objects.header.stamp = stamp
-                        for r in results:
-                            o = DetectedObject()
-                            o.category = int(r[1])
-                            o.label = self.categories[int(r[1])]
-                            o.confidence = r[2]
+            stereo_image = self.bridge.cv2_to_imgmsg(stereo_frame)
+            stereo_image.header.stamp = stamp
+            stereo_image.header.frame_id = self.frame_id
+            self.stereo_pub.publish(stereo_image)
+            self.publish_camera_info(self.stereo_camera_mgr, self.stereo_info_pub, stamp)
+        except Exception as e:
+            rospy.logwarn("Failed to publish stereo frame: {0}".format(e))
 
-                            ctr_x = (r[3] + r[5])/2
-                            ctr_y = (r[4] + r[6])/2
-                            w = r[5] - r[3]
-                            h = r[6] - r[4]
+    def publish_left_frame(self, in_left, stamp):
+        try:
+            left_frame = in_left.getData().reshape((in_left.getHeight(), in_left.getWidth())).astype(np.uint8)
+            left_frame = np.ascontiguousarray(left_frame)
 
-                            ctr_x = ctr_x * RGB_WIDTH
-                            ctr_y = ctr_y * RGB_HEIGHT
-                            w = w * RGB_WIDTH
-                            h = h * RGB_HEIGHT
+            left_image = self.bridge.cv2_to_imgmsg(left_frame)
+            left_image.header.stamp = stamp
+            left_image.header.frame_id = self.frame_id
+            self.left_pub.publish(left_image)
+            self.publish_camera_info(self.left_camera_mgr, self.left_info_pub, stamp)
+        except Exception as e:
+            rospy.logwarn("Failed to publish left frame: {0}".format(e))
 
-                            o.bbox = BoundingBox2D()
-                            o.bbox.center = Pose2D(ctr_x, ctr_y, 0)
-                            o.bbox.size_x = w
-                            o.bbox.size_y = h
+    def publish_right_frame(self, in_right, stamp):
+        try:
+            right_frame = in_right.getData().reshape((in_right.getHeight(), in_right.getWidth())).astype(np.uint8)
+            right_frame = np.ascontiguousarray(right_frame)
 
-                            if self.last_rgb is not None:
-                                cropped = self.last_rgb[int(r[4]*RGB_HEIGHT):int(r[6]*RGB_HEIGHT), int(r[3]*RGB_WIDTH):int(r[5]*RGB_WIDTH)]
-                                roi = self.bridge.cv2_to_imgmsg(cropped)
-                                o.image = roi
+            right_image = self.bridge.cv2_to_imgmsg(right_frame)
+            right_image.header.stamp = stamp
+            right_image.header.frame_id = self.frame_id
+            self.right_pub.publish(right_image)
+            self.publish_camera_info(self.right_camera_mgr, self.right_info_pub, stamp)
+        except Exception as e:
+            rospy.logwarn("Failed to publish right frame: {0}".format(e))
 
-                            arr.append(o)
+    def publish_color_frame(self, in_rgb, stamp):
+        try:
+            rgb_frame = in_rgb.getCvFrame()
+            self.last_rgb = rgb_frame
 
-                        objects.objects = arr
-                        self.objects_pub.publish(objects)
+            rgb_image = self.bridge.cv2_to_imgmsg(rgb_frame)
+            rgb_image.header.stamp = stamp
+            rgb_image.header.frame_id = self.frame_id
+            self.rgb_pub.publish(rgb_image)
+            self.publish_camera_info(self.rgb_camera_mgr, self.rgb_info_pub, stamp)
+        except Exception as e:
+            rospy.logwarn("Failed to publish rgb frame: {0}".format(e))
+
+    def publish_nn_detect(self, in_nn, stamp):
+        try:
+            # [[image_id, label, confidence, x_min, y_min, x_max, y_max], ...]
+            results = np.array(in_nn.getFirstLayerFp16())
+            results = results[:np.where(results == -1)[0][0]]
+            results = results.reshape((results.size // 7, 7))
+
+            # reshape the array to be [[x7], [x7], ...]
+            results = results[results[:, 2] > 0.8][:, 0:7]
+
+            if len(results) > 0:
+                objects = DetectedObjects()
+                arr = []
+                objects.header.stamp = stamp
+                for r in results:
+                    o = DetectedObject()
+                    o.category = int(r[1])
+                    o.label = self.categories[int(r[1])]
+                    o.confidence = r[2]
+
+                    ctr_x = (r[3] + r[5])/2
+                    ctr_y = (r[4] + r[6])/2
+                    w = r[5] - r[3]
+                    h = r[6] - r[4]
+
+                    ctr_x = ctr_x * RGB_WIDTH
+                    ctr_y = ctr_y * RGB_HEIGHT
+                    w = w * RGB_WIDTH
+                    h = h * RGB_HEIGHT
+
+                    o.bbox = BoundingBox2D()
+                    o.bbox.center = Pose2D(ctr_x, ctr_y, 0)
+                    o.bbox.size_x = w
+                    o.bbox.size_y = h
+
+                    if self.last_rgb is not None:
+                        cropped = self.last_rgb[int(r[4]*RGB_HEIGHT):int(r[6]*RGB_HEIGHT), int(r[3]*RGB_WIDTH):int(r[5]*RGB_WIDTH)]
+                        roi = self.bridge.cv2_to_imgmsg(cropped)
+                        o.image = roi
+
+                    arr.append(o)
+
+                objects.objects = arr
+                self.objects_pub.publish(objects)
+        except Exception as e:
+            rospy.logwarn("Failed to publish NN output: {0}".format(e))
 
     def publish_camera_info(self, mgr, pub, stamp):
         data = mgr.getCameraInfo()
